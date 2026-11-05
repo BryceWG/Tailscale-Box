@@ -1,0 +1,84 @@
+name: Build module
+on:
+  push:
+    paths:
+      - module.prop
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: module-build-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.version.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: version
+        env:
+          BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          python3 - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          from scripts.build import metadata
+          current = metadata()
+          before = os.environ.get('BEFORE', '')
+          old = {}
+          if before and set(before) != {'0'}:
+              result = subprocess.run(['git', 'show', f'{before}:module.prop'], capture_output=True, text=True)
+              if result.returncode == 0:
+                  old = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line and not line.startswith('#'))
+          changed = os.environ['EVENT'] == 'workflow_dispatch' or any(current[k] != old.get(k) for k in ('version', 'versionCode'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'changed={str(changed).lower()}\nversion={current["version"]}\n')
+          PY
+  build:
+    needs: version
+    if: needs.version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate scripts and package boundaries
+        run: |
+          for script in *.sh; do sh -n "$script"; done
+          node --check webroot/app.js
+          python -m unittest discover -s tests
+      - name: Build minimal and latest stable bundled packages
+        run: python scripts/build.py --variant both
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.zip > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-box-${{ needs.version.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+  release:
+    needs: [version, build]
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tailscale-box-${{ needs.version.outputs.version }}
+          path: dist
+      - name: Publish versioned release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          gh release create "v$VERSION" dist/* --target "$COMMIT" --title "Tailscale Box $VERSION" --notes 'ARM64: choose minimal to install Tailscale later with Action/WebUI, or bundled for the official stable version resolved at build time. SHA256SUMS verifies the module ZIPs. See README for manager compatibility.'

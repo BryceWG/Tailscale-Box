@@ -1,0 +1,5 @@
+Reference source commit at verification: 1e554f7be132d5881eaf335eb21f5be3af8a88be
+https://raw.githubusercontent.com/Magisk-Modules-Alt-Repo/Magisk-Tailscaled/1e554f7be132d5881eaf335eb21f5be3af8a88be/files/tailscale-arm64
+58e147fea4074b522f655963b31b066aae9bc1aded4c8075d2844db32b4bb20e  bin/tailscale
+https://raw.githubusercontent.com/Magisk-Modules-Alt-Repo/Magisk-Tailscaled/1e554f7be132d5881eaf335eb21f5be3af8a88be/files/tailscaled-arm64
+468490e44595611952dca026353554f4b03d8c859c940ba6f1810d0421049878  bin/tailscaled

@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f4f3ee">
+<title>Tailscale Box</title>
+<link rel="stylesheet" href="./app.css">
+<script src="./app.js" defer></script>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <circle cx="6.5" cy="6.5" r="2.1"/><circle cx="17.5" cy="6.5" r="2.1"/>
+          <circle cx="6.5" cy="17.5" r="2.1"/><circle cx="17.5" cy="17.5" r="2.1"/>
+          <path d="M8.6 6.5h6.8M6.5 8.6v6.8M17.5 8.6v6.8M8.6 17.5h6.8" opacity=".5"/>
+        </svg>
+      </span>
+      <div class="brand-text">
+        <h1>Tailscale Box</h1>
+        <p id="hostLabel">正在检测宿主</p>
+      </div>
+    </div>
+    <button id="refreshBtn" class="icon-btn" type="button" aria-label="刷新状态" title="刷新状态">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M20 11a8 8 0 1 0-2.3 5.4"/><path d="M20 4v7h-7"/>
+      </svg>
+    </button>
+  </header>
+
+  <div id="busyBar" class="busy" role="status" aria-live="polite" hidden>
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="busyText">正在执行</span>
+    <span id="busyTime" class="busy-time"></span>
+  </div>
+
+  <div id="banner" class="banner" role="alert" hidden></div>
+
+  <main>
+    <section id="screenHost" hidden>
+      <div class="screen-head">
+        <p class="kicker">宿主</p>
+        <h2>需要支持 root 执行的 WebUI</h2>
+        <p>当前页面没有可用的 root 执行接口，因此无法操作模块。</p>
+      </div>
+      <ol class="steps">
+        <li>Magisk 官方管理器没有内置 WebUI，请使用 WebUI X、KernelSU 管理器或 APatch 管理器打开本模块页面。</li>
+        <li>确认宿主已授予 root 权限。普通浏览器打开本页时出现此提示是正常的。</li>
+        <li>若管理器已支持 WebUI，更新到最新版后重试。</li>
+      </ol>
+    </section>
+
+    <section id="screenInstall" hidden>
+      <div class="screen-head">
+        <p class="kicker">模块</p>
+        <h2>尚未安装或文件缺失</h2>
+        <p>没有检测到可用的模块后端。若 webui.sh 已可用，可以直接安装 Tailscale 二进制；模块文件仍需安装 ZIP。</p>
+      </div>
+      <ol class="steps">
+        <li>在 Magisk、KernelSU 或 APatch 中安装 Tailscale Box 的 ZIP。</li>
+        <li>重启设备，确认模块已启用。</li>
+        <li>确认模块目录中的 <code>webui.sh</code> 存在。</li>
+        <li>从模块页面重新打开 WebUI。</li>
+      </ol>
+      <p id="installError" class="detail"></p>
+      <button id="installUpdateBtn" class="btn primary wide" type="button">安装 Tailscale</button>
+      <p class="hint">从官方源下载并替换 Tailscale 二进制，不安装模块文件。</p>
+      <button id="installRefresh" class="btn wide" type="button">重新检测</button>
+    </section>
+
+    <section id="screenApp" hidden>
+      <section class="status-block">
+        <div class="status-line">
+          <span class="dot" id="stateDot" aria-hidden="true"></span>
+          <span class="status-label" id="stateLabel">—</span>
+        </div>
+        <h2 id="stateTitle">—</h2>
+        <p id="stateSub" class="sub">—</p>
+        <dl class="facts">
+          <div><dt>设备</dt><dd id="factName">—</dd></div>
+          <div><dt>地址</dt><dd id="factIps">—</dd></div>
+          <div><dt>版本</dt><dd id="factVersion">—</dd></div>
+          <div><dt>系统</dt><dd id="factOs">—</dd></div>
+        </dl>
+        <p class="stamp">最后刷新 <span id="lastUpdated">—</span></p>
+      </section>
+
+      <section id="authCard" class="card auth" hidden>
+        <h3>完成登录</h3>
+        <p id="authDesc" class="sub">此设备尚未加入 Tailnet。</p>
+        <div id="authUrlBox" class="auth-url" hidden>
+          <p class="url-host" id="authHost"></p>
+          <code id="authUrl"></code>
+          <div class="row">
+            <a id="authOpen" class="btn primary" href="#" target="_blank" rel="noopener noreferrer">打开授权页</a>
+            <button id="authCopy" class="btn" type="button">复制链接</button>
+          </div>
+          <p class="hint">按钮无法打开时，请复制链接到浏览器访问。</p>
+        </div>
+        <button id="loginBtn" class="btn primary wide" type="button">开始登录</button>
+        <p class="hint" id="loginHint">登录最长约 65 秒，请勿关闭页面。</p>
+      </section>
+
+      <section class="actions" aria-label="服务操作">
+        <button id="startBtn" class="btn" type="button">启动</button>
+        <button id="stopBtn" class="btn" type="button">停止</button>
+        <button id="repairBtn" class="btn" type="button">修复路由</button>
+        <button id="updateBtn" class="btn" type="button">安装更新</button>
+      </section>
+      <p class="hint actions-hint">更新只替换 Tailscale 二进制，模块自身升级仍需安装新 ZIP。</p>
+
+      <section class="card peers">
+        <div class="card-head">
+          <h3>其他设备 <span id="peerCount" class="count">0</span></h3>
+          <span id="peerSummary" class="card-meta"></span>
+        </div>
+        <p id="peerEmpty" class="empty" hidden>还没有其他设备加入这个 Tailnet。</p>
+        <ul id="peerList" class="peer-list"></ul>
+      </section>
+
+      <section class="card netcheck">
+        <div class="card-head">
+          <h3>网络延迟</h3>
+          <button id="netcheckBtn" class="text-btn" type="button">测试</button>
+        </div>
+        <p id="netEmpty" class="empty">尚未测试。netcheck 最长约 30 秒。</p>
+        <div id="netResult" hidden>
+          <p id="netNote" class="sub"></p>
+          <ul id="netList" class="lat-list"></ul>
+          <details class="raw-box">
+            <summary>原始输出</summary>
+            <pre id="netRaw"></pre>
+          </details>
+        </div>
+      </section>
+
+      <details id="outputCard" class="card output" hidden>
+        <summary><span id="outputTitle">命令输出</span></summary>
+        <pre id="outputPre"></pre>
+      </details>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span id="footBridge">Tailscale Box</span> · ARM64
+  </footer>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<noscript><p class="banner">此页面需要启用 JavaScript。</p></noscript>
+</body>
+</html>
