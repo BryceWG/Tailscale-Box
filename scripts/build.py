@@ -16,7 +16,7 @@ STABLE = "https://pkgs.tailscale.com/stable/"
 REPOSITORY = "https://github.com/BryceWG/Tailscale-Box"
 FILES = (
     "module.prop", "customize.sh", "action.sh", "ctl.sh", "update.sh",
-    "webui.sh", "network-diagnose.sh", "service.sh", "uninstall.sh", "README.md",
+    "webui.sh", "network-diagnose.sh", "taildrop.sh", "service.sh", "uninstall.sh", "README.md",
     "LICENSE.tailscale", "LICENSE.reference",
 )
 

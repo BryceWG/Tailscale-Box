@@ -10,7 +10,7 @@ if [ ! -f "$MODPATH/bin/tailscale" ] && [ -x "$OLD/bin/tailscale" ] && [ -x "$OL
  mkdir -p "$MODPATH/bin"
  cp -p "$OLD/bin/tailscale" "$OLD/bin/tailscaled" "$MODPATH/bin/" || abort "Cannot preserve installed Tailscale"
 fi
-for SCRIPT in ctl.sh update.sh action.sh webui.sh network-diagnose.sh service.sh uninstall.sh; do
+for SCRIPT in ctl.sh update.sh action.sh webui.sh network-diagnose.sh taildrop.sh service.sh uninstall.sh; do
  set_perm "$MODPATH/$SCRIPT" 0 0 0755
 done
 if [ -f "$MODPATH/bin/tailscale" ] && [ -f "$MODPATH/bin/tailscaled" ]; then
@@ -21,5 +21,10 @@ else
  ui_print "Minimal package: use Action or WebUI to install Tailscale"
 fi
 # webroot permissions and contexts are managed by the WebUI host.
+if /system/bin/sh "$MODPATH/taildrop.sh" prepare >> /data/adb/tailscale-direct/taildrop.log 2>&1; then
+ ui_print "Taildrop folder ready: Download/taildrop"
+else
+ ui_print "Taildrop folder will be created after shared storage is ready"
+fi
 ui_print "Tailscale Box installed"
 ui_print "WebUI: KernelSU/APatch or compatible WebUI host"

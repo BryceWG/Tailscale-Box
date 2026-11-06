@@ -45,7 +45,11 @@ routes() {
 }
 start() {
  [ -x "$MODDIR/bin/tailscale" ] && [ -x "$MODDIR/bin/tailscaled" ] || { echo "Tailscale not installed; run the module Action button first"; return 1; }
- if alive; then echo 'Already running'; return 0; fi
+ if alive; then
+  echo 'Already running'
+  "$MODDIR/taildrop.sh" start || echo 'Taildrop receiver did not start; inspect taildrop.log'
+  return 0
+ fi
  if pidof tailscaled >/dev/null 2>&1; then echo 'Another tailscaled exists; stop it first'; return 1; fi
  [ -c /dev/net/tun ] || [ -c /dev/tun ] || { echo 'No TUN device'; return 1; }
  ip link show tailscale0 >/dev/null 2>&1 && { echo 'tailscale0 already exists'; return 1; }
@@ -59,6 +63,7 @@ start() {
   [ "$TS_WAIT" -lt 15 ] || { echo 'Daemon not ready'; return 1; }
   sleep 1
  done
+ "$MODDIR/taildrop.sh" start || echo 'Taildrop receiver did not start; inspect taildrop.log'
  TS_WAIT=0
  until routes; do
   TS_WAIT=$((TS_WAIT + 1))
@@ -69,6 +74,7 @@ start() {
 }
 stop() {
  clean_rules
+ "$MODDIR/taildrop.sh" stop || return 1
  if alive; then
   kill -TERM "$TS_PID" || return 1
   TS_WAIT=0
