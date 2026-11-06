@@ -1,4 +1,4 @@
-# Tailscale Box 1.1.0 (ARM64)
+# Tailscale Box 1.1.1 (ARM64)
 
 Android Root 模块，使用原生 tailscale0 TUN：应用 → 系统路由 → tailscaled → 对端。
 使用 tailscaled 用户态 WireGuard，不使用 Android VPNService。仅支持 ARM64。
@@ -25,6 +25,10 @@ GitHub Release 提供以下两种 ZIP，均可由模块管理器直接安装：
 页面由 Pi 设计，资源随模块提供，无 CDN。通过管理器 root exec 桥接调用 `webui.sh` 的固定操作，不开放 HTTP 服务端口。
 
 页面支持查看当前版本、服务/登录状态、Tailnet IP、设备与 Peer 在线状态、直连/中继信息，以及 `tailscale netcheck` 的 UDP、NAT 和 DERP 区域延迟。延迟是设备到中继区域的测量，并非每台 Peer 的端到端延迟；没有活动连接的 Peer 可能没有直连信息。
+
+版本旁的「检查更新」只查询官方 stable ARM64 版本，不下载或替换二进制，支持已有的本地 control-proxy 配置。设备行的 Ping 按钮持续发起单次 Tailscale Ping，显示响应延迟、平均值和丢失统计；中继响应也计为成功。停止按钮或离开页面后不再发起下一次请求。
+
+桥接新增 `webui.sh check-update`，返回 `{current, latest, available, output, exitCode}`；空安装的 current 为空，查询失败的 latest 为空。`webui.sh ping <ip>` 返回 `{output, exitCode}`，执行 `tailscale ping --c 1 --timeout=3s --until-direct=false <ip>`，外层限制 6 秒。两者均不占用全局操作锁，Ping 参数只接受 IP 字符并作为单一参数传递，实际地址有效性由 Tailscale 校验。
 
 登录流程为：启动 → 登录 → 打开页面返回的 Tailscale 授权链接 → 浏览器完成授权 → 返回刷新，必要时点击修复路由。授权链接通过 Tailscale CLI 获取，最长约 60 秒返回；登录等待超时仍可能已生成有效链接。不要分享该链接。
 

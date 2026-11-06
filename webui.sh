@@ -19,6 +19,55 @@ if [ -f "$D/tailscaled.pid" ]; then
  esac
 fi
 case "$1" in
+ check-update)
+  : > "$T/current"; : > "$T/latest"; : > "$T/output"
+  if $installed; then "$M/bin/tailscale" version 2>/dev/null | head -n 1 > "$T/current"; fi
+  # Same optional local control proxy used by the updater, without changing files.
+  if [ -s "$D/control-proxy" ]; then
+   proxy=$(cat "$D/control-proxy")
+   case "$proxy" in
+    http://127.0.0.1:*|http://localhost:*) export http_proxy="$proxy" https_proxy="$proxy" HTTP_PROXY="$proxy" HTTPS_PROXY="$proxy";;
+    *) printf '{"current":"","latest":"","available":false,"output":"Invalid control-proxy","exitCode":1}\n'; exit 0;;
+   esac
+  fi
+  curl -fsSL --connect-timeout 10 --max-time 20 'https://pkgs.tailscale.com/stable/?mode=json' -o "$T/meta" 2> "$T/output"
+  rc=$?
+  available=false
+  if [ "$rc" -eq 0 ]; then
+   grep -oE 'tailscale_[0-9]+\.[0-9]+\.[0-9]+_arm64\.tgz' "$T/meta" | head -n 1 | sed 's/^tailscale_//; s/_arm64\.tgz$//' > "$T/latest"
+   if [ -s "$T/latest" ]; then
+    current=$(cat "$T/current"); latest=$(cat "$T/latest")
+    available=$(awk -v current="$current" -v latest="$latest" 'BEGIN {
+     if(current==""){print "true";exit}
+     split(current,c,".");split(latest,l,".")
+     for(i=1;i<=3;i++){if(l[i]+0>c[i]+0){print "true";exit}if(l[i]+0<c[i]+0){print "false";exit}}
+     print "false"
+    }')
+    printf 'Installed-%s\nStable-%s\n' "$current" "$latest" > "$T/output"
+   else rc=1; echo 'Invalid stable ARM64 metadata' > "$T/output"; fi
+  fi
+  printf '{"current":'; json_file "$T/current"
+  printf ',"latest":'; json_file "$T/latest"
+  printf ',"available":%s,"exitCode":%s,"output":' "$available" "$rc"; json_file "$T/output"
+  printf '}\n';;
+ ping)
+  # Literal IP only, one request per invocation; never take the mutation lock.
+  ip=$2
+  case "$ip" in
+   ''|*[!0-9a-fA-F:.]*) valid=false;;
+   *:*|*.*) valid=true;;
+   *) valid=false;;
+  esac
+  if [ "$#" -ne 2 ] || [ "${#ip}" -gt 45 ] || ! $valid; then
+   printf '{"output":"Invalid IP address","exitCode":1}\n'; exit 0
+  fi
+  if ! $installed; then
+   printf '{"output":"Tailscale is not installed","exitCode":1}\n'; exit 0
+  fi
+  # until-direct=false counts a successful DERP pong as success as well.
+  timeout 6 "$M/ctl.sh" ts ping --c 1 --timeout=3s --until-direct=false "$ip" > "$T/output" 2>&1
+  rc=$?
+  printf '{"exitCode":%s,"output":' "$rc"; json_file "$T/output"; printf '}\n';;
  status)
   printf '{"installed":%s,"running":%s,"version":' "$installed" "$running"
   if $installed; then "$M/bin/tailscale" version 2>/dev/null | head -n 1 > "$T/version"; else : > "$T/version"; fi

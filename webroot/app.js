@@ -5,6 +5,8 @@ const TIMEOUTS = {
   status: 20000,
   login: 75000,
   netcheck: 40000,
+  checkUpdate: 95000,
+  ping: 12000,
   control: 90000,
   update: 1200000,
 };
@@ -13,27 +15,22 @@ const AUTH_HOSTS = new Set(['login.tailscale.com', 'controlplane.tailscale.com']
 const $ = (id) => document.getElementById(id);
 
 const el = {
-  hostLabel: $('hostLabel'),
   footBridge: $('footBridge'),
   refreshBtn: $('refreshBtn'),
-  busyBar: $('busyBar'),
-  busyText: $('busyText'),
-  busyTime: $('busyTime'),
   banner: $('banner'),
   screenHost: $('screenHost'),
   screenInstall: $('screenInstall'),
   screenApp: $('screenApp'),
   installError: $('installError'),
+  hostRefresh: $('hostRefresh'),
   installRefresh: $('installRefresh'),
   installUpdateBtn: $('installUpdateBtn'),
   stateDot: $('stateDot'),
   stateLabel: $('stateLabel'),
   stateTitle: $('stateTitle'),
   stateSub: $('stateSub'),
-  factName: $('factName'),
   factIps: $('factIps'),
   factVersion: $('factVersion'),
-  factOs: $('factOs'),
   lastUpdated: $('lastUpdated'),
   authCard: $('authCard'),
   authDesc: $('authDesc'),
@@ -44,8 +41,11 @@ const el = {
   authCopy: $('authCopy'),
   loginBtn: $('loginBtn'),
   loginHint: $('loginHint'),
-  startBtn: $('startBtn'),
-  stopBtn: $('stopBtn'),
+  powerBtn: $('powerBtn'),
+  powerPlay: document.querySelector('.power-play'),
+  powerStop: document.querySelector('.power-stop'),
+  checkUpdateBtn: $('checkUpdateBtn'),
+  updateNote: $('updateNote'),
   repairBtn: $('repairBtn'),
   updateBtn: $('updateBtn'),
   peerCount: $('peerCount'),
@@ -67,17 +67,21 @@ const el = {
 const ui = {
   payload: null,
   status: null,
+  netLatencies: new Map(),
   busy: false,
+  busyText: '',
+  busyHint: '',
   refreshing: false,
   authUrl: null,
   probeBusy: false,
+  updateCheckedFor: '',
+  ping: null,
 };
 
 let bridge = null;
 let callbackSeq = 0;
-let busyTimer = null;
-let busyStart = 0;
 let toastTimer = null;
+let pingTimer = null;
 
 /* Root bridge: KernelSU / APatch compatible exec(command, "{}", callback) */
 
@@ -156,25 +160,35 @@ async function callWebui(sub, timeoutMs) {
 
 /* Feedback */
 
-function setBusy(text) {
+function renderBusyStatus() {
+  el.stateDot.className = 'dot warn busy';
+  el.stateLabel.textContent = '处理中';
+  el.stateTitle.textContent = ui.busyText;
+  el.stateSub.textContent = ui.busyHint;
+}
+
+function setBusy(text, hint) {
   ui.busy = true;
-  el.busyText.textContent = text;
-  el.busyBar.hidden = false;
-  el.busyTime.textContent = '0s';
-  busyStart = Date.now();
-  clearInterval(busyTimer);
-  busyTimer = setInterval(() => {
-    el.busyTime.textContent = `${Math.floor((Date.now() - busyStart) / 1000)}s`;
-  }, 1000);
+  ui.busyText = text;
+  ui.busyHint = hint || '请稍候';
+  renderBusyStatus();
+  if (!el.screenInstall.hidden && text === '正在安装更新') {
+    el.installUpdateBtn.textContent = '正在安装…';
+  }
   syncControls();
 }
 
 function clearBusy() {
   ui.busy = false;
-  clearInterval(busyTimer);
-  busyTimer = null;
-  el.busyBar.hidden = true;
+  ui.busyText = '';
+  ui.busyHint = '';
+  el.installUpdateBtn.textContent = '安装 Tailscale';
   syncControls();
+  if (ui.payload && ui.payload.installed) {
+    const stamp = el.lastUpdated.textContent;
+    renderStatus(ui.payload);
+    el.lastUpdated.textContent = stamp;
+  }
 }
 
 function toast(message, tone) {
@@ -211,8 +225,8 @@ function syncControls() {
 
   el.refreshBtn.disabled = ui.busy || ui.refreshing || !bridge;
   el.installRefresh.disabled = ui.busy || ui.refreshing || !bridge;
-  el.startBtn.disabled = !ready || running;
-  el.stopBtn.disabled = !ready || !running;
+  el.powerBtn.disabled = !ready;
+  el.checkUpdateBtn.disabled = !ready;
   el.repairBtn.disabled = !ready || !running;
   el.updateBtn.disabled = !bridge || ui.busy;
   el.installUpdateBtn.disabled = !bridge || ui.busy;
@@ -220,13 +234,19 @@ function syncControls() {
   el.loginBtn.disabled = !ready || !running;
   el.authCopy.disabled = ui.busy || !ui.authUrl;
 
-  el.startBtn.classList.toggle('primary', !running);
+  const powerLabel = running ? '停止服务' : '启动服务';
+  el.powerBtn.setAttribute('aria-label', powerLabel);
+  el.powerBtn.title = powerLabel;
+  el.powerBtn.classList.toggle('on', running);
+  el.powerPlay.classList.toggle('is-hidden', running);
+  el.powerStop.classList.toggle('is-hidden', !running);
   el.loginHint.textContent = running
-    ? '登录最长约 65 秒，请勿关闭页面。'
-    : '先启动服务，再开始登录。';
+    ? '登录最长约 65 秒，请勿关闭页面'
+    : '先启动服务，再开始登录';
 }
 
 function showScreen(name) {
+  if (name !== 'app' && ui.ping) stopPing(false);
   el.screenHost.hidden = name !== 'host';
   el.screenInstall.hidden = name !== 'install';
   el.screenApp.hidden = name !== 'app';
@@ -236,28 +256,28 @@ function showScreen(name) {
 
 function stateInfo(running, backend) {
   if (!running) {
-    return { tone: 'bad', label: '已停止', title: '服务未运行', sub: 'tailscaled 守护进程未启动。' };
+    return { tone: 'bad', label: '已停止', title: '服务未运行', sub: 'tailscaled 守护进程未启动' };
   }
   switch (backend) {
     case 'Running':
-      return { tone: 'ok', label: '已连接', title: 'Tailnet 已连接', sub: '本机可通过 Tailnet 访问其他设备。' };
+      return { tone: 'ok', label: '已连接', title: 'Tailnet 已连接', sub: '本机可通过 Tailnet 访问其他设备' };
     case 'NeedsLogin':
-      return { tone: 'warn', label: '需要登录', title: '等待授权登录', sub: '在浏览器完成 Tailscale 授权。' };
+      return { tone: 'warn', label: '需要登录', title: '等待授权登录', sub: '在浏览器完成 Tailscale 授权' };
     case 'Starting':
-      return { tone: 'warn', label: '启动中', title: '正在建立连接', sub: 'tailscaled 正在启动。' };
+      return { tone: 'warn', label: '启动中', title: '正在建立连接', sub: 'tailscaled 正在启动' };
     case 'NoState':
-      return { tone: 'warn', label: '未登录', title: '尚未初始化', sub: '完成登录后才能加入 Tailnet。' };
+      return { tone: 'warn', label: '未登录', title: '尚未初始化', sub: '完成登录后才能加入 Tailnet' };
     case 'Stopped':
-      return { tone: 'bad', label: '已停止', title: '服务已停止', sub: 'tailscaled 已停止运行。' };
+      return { tone: 'bad', label: '已停止', title: '服务已停止', sub: 'tailscaled 已停止运行' };
     default:
-      return { tone: 'warn', label: '运行中', title: '服务运行中', sub: '暂时无法读取详细连接状态。' };
+      return { tone: 'warn', label: '运行中', title: '服务运行中', sub: '暂时无法读取详细连接状态' };
   }
 }
 
 async function refreshStatus() {
   if (!bridge || ui.refreshing) return;
   ui.refreshing = true;
-  setBusy('正在读取状态');
+  setBusy('正在刷新状态', '读取 Tailscale 连接信息');
   try {
     const data = await callWebui('status', TIMEOUTS.status);
     applyStatus(data);
@@ -278,6 +298,7 @@ async function refreshStatus() {
 
 function applyStatus(data) {
   ui.payload = data;
+  if (ui.ping && (!data.installed || !data.running)) stopPing(false);
   ui.status = data.status && typeof data.status === 'object' && !Array.isArray(data.status) ? data.status : null;
 
   if (!data.installed) {
@@ -311,14 +332,14 @@ function renderStatus(data) {
   el.stateTitle.textContent = info.title;
   el.stateSub.textContent = running && backend === 'Running' && tailnet ? `已加入 ${tailnet}` : info.sub;
 
-  const hostname = self ? self.HostName || stripDot(self.DNSName) : '';
   const ips = self && Array.isArray(self.TailscaleIPs) ? self.TailscaleIPs.filter((ip) => typeof ip === 'string') : [];
 
-  el.factName.textContent = hostname || '—';
   el.factIps.textContent = ips.length ? ips.join(' · ') : '—';
-  el.factVersion.textContent = data.version || (status && status.Version) || '—';
-  el.factOs.textContent = (self && self.OS) || '—';
+  const version = data.version || (status && status.Version) || '';
+  if (ui.updateCheckedFor && normVersion(version) !== ui.updateCheckedFor) clearUpdateNote();
+  el.factVersion.textContent = version || '—';
   el.lastUpdated.textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  if (ui.busy) renderBusyStatus();
 }
 
 function renderMessages(data) {
@@ -335,18 +356,17 @@ function renderUnavailable() {
   el.stateDot.className = 'dot bad';
   el.stateLabel.textContent = '不可用';
   el.stateTitle.textContent = '无法读取状态';
-  el.stateSub.textContent = '确认宿主已授权 root，然后刷新重试。';
-  el.factName.textContent = '—';
+  el.stateSub.textContent = '确认宿主已授权 root，然后刷新重试';
   el.factIps.textContent = '—';
   el.factVersion.textContent = '—';
-  el.factOs.textContent = '—';
+  clearUpdateNote();
   el.lastUpdated.textContent = '—';
   el.authCard.hidden = true;
   setAuthUrl(null);
   el.peerCount.textContent = '0';
   el.peerSummary.textContent = '';
   el.peerList.replaceChildren();
-  el.peerEmpty.textContent = '无法读取设备列表。';
+  el.peerEmpty.textContent = '无法读取设备列表';
   el.peerEmpty.hidden = false;
   syncControls();
 }
@@ -432,8 +452,8 @@ function renderAuth() {
 
   el.authCard.hidden = false;
   el.authDesc.textContent = ui.authUrl
-    ? '在浏览器完成授权后返回本页刷新；若路由未生效，点「修复路由」。'
-    : '此设备尚未授权。点击开始登录获取授权链接。';
+    ? '在浏览器完成授权后返回本页刷新；若路由未生效，点「修复路由」'
+    : '此设备尚未授权，点击开始登录获取授权链接';
   el.loginBtn.textContent = ui.authUrl ? '重新获取授权链接' : '开始登录';
 }
 
@@ -474,13 +494,19 @@ function renderPeers() {
       const ips = Array.isArray(peer.TailscaleIPs)
         ? peer.TailscaleIPs.filter((ip) => typeof ip === 'string')
         : [];
+      const dnsName = stripDot(peer.DNSName);
+      const name = peer.HostName || dnsName || ips[0] || '未知设备';
       return {
-        name: peer.HostName || stripDot(peer.DNSName) || ips[0] || '未知设备',
+        name,
+        key: typeof peer.ID === 'string' ? peer.ID : `${name}|${ips.join(',')}`,
+        ip: ips.find((ip) => ip.includes('.')) || ips[0] || '',
+        dnsName: dnsName && dnsName !== name ? dnsName : '',
         ips: ips.join(', '),
         os: typeof peer.OS === 'string' ? peer.OS : '',
         online: Boolean(peer.Online),
         direct: Boolean(peer.CurAddr),
         relay: typeof peer.Relay === 'string' ? peer.Relay : '',
+        curAddr: typeof peer.CurAddr === 'string' ? peer.CurAddr : '',
         exitNode: Boolean(peer.ExitNode),
         lastSeen: peer.LastSeen,
       };
@@ -490,6 +516,7 @@ function renderPeers() {
     if (a.online !== b.online) return a.online ? -1 : 1;
     return a.name.localeCompare(b.name, 'zh-Hans-CN', { sensitivity: 'base' });
   });
+  if (ui.ping && !peers.some((peer) => peer.key === ui.ping.key)) stopPing(false);
 
   const online = peers.filter((peer) => peer.online).length;
   const direct = peers.filter((peer) => peer.online && peer.direct).length;
@@ -499,7 +526,7 @@ function renderPeers() {
 
   el.peerCount.textContent = String(peers.length);
   el.peerSummary.textContent = peers.length ? summary.join(' · ') : '';
-  el.peerEmpty.textContent = '还没有其他设备加入这个 Tailnet。';
+  el.peerEmpty.textContent = '还没有其他设备加入这个 Tailnet';
   el.peerEmpty.hidden = peers.length > 0;
   el.peerList.replaceChildren();
 
@@ -538,6 +565,12 @@ function renderPeers() {
 
     main.appendChild(nameRow);
     main.appendChild(meta);
+    if (peer.dnsName) {
+      const detail = document.createElement('div');
+      detail.className = 'peer-detail';
+      detail.textContent = peer.dnsName;
+      main.appendChild(detail);
+    }
 
     const path = document.createElement('div');
     path.className = 'peer-path';
@@ -550,25 +583,178 @@ function renderPeers() {
       label.textContent = '直连';
     } else if (peer.relay) {
       label.className = 'path-label';
-      label.textContent = 'DERP';
+      label.textContent = `DERP ${peer.relay.toUpperCase()}`;
     } else {
       label.className = 'path-label';
       label.textContent = '未知';
     }
     path.appendChild(label);
 
-    if (peer.online && !peer.direct && peer.relay) {
-      const note = document.createElement('span');
-      note.className = 'path-note';
-      note.textContent = peer.relay;
-      path.appendChild(note);
+    let note = '—';
+    if (peer.online && peer.direct) {
+      note = peer.curAddr || '—';
+    } else if (peer.online && peer.relay) {
+      const latency = relayLatency(peer.relay);
+      note = latency != null ? `${latency.toFixed(1)} ms` : '延迟未知';
     }
+    const noteEl = document.createElement('span');
+    noteEl.className = 'path-note';
+    noteEl.textContent = note;
+    noteEl.title = note;
+    path.appendChild(noteEl);
+    const pingActive = Boolean(ui.ping && ui.ping.key === peer.key);
+    const pingBtn = document.createElement('button');
+    pingBtn.type = 'button';
+    pingBtn.className = 'peer-ping' + (pingActive ? ' active' : '');
+    pingBtn.textContent = pingActive ? '停止' : 'Ping';
+    pingBtn.disabled = !bridge || (!pingActive && (!peer.online || !ui.payload.running));
+    pingBtn.title = pingActive ? `停止 Ping ${peer.name}` : (peer.online ? `Ping ${peer.name}` : '设备离线，无法 Ping');
+    pingBtn.setAttribute('aria-label', pingBtn.title);
+    pingBtn.setAttribute('aria-pressed', pingActive ? 'true' : 'false');
+    pingBtn.addEventListener('click', () => {
+      if (pingActive) stopPing();
+      else startPing(peer);
+    });
+    path.appendChild(pingBtn);
 
     item.appendChild(dot);
     item.appendChild(main);
     item.appendChild(path);
+    if (pingActive) item.appendChild(buildPingPanel(ui.ping));
     el.peerList.appendChild(item);
   }
+}
+
+function relayLatency(relay) {
+  const code = typeof relay === 'string' ? relay.trim().toLowerCase() : '';
+  if (!code) return null;
+  const ms = ui.netLatencies.get(code);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+const PING_INTERVAL = 1500;
+const PING_LIMIT = 30;
+const PING_IP = /^[0-9a-fA-F:.]{3,45}$/;
+
+function parsePingMs(output) {
+  const matches = [...String(output == null ? '' : output).matchAll(/\bin\s+([0-9.]+)\s*ms\b/gi)];
+  return matches.length ? Number(matches[matches.length - 1][1]) : null;
+}
+
+function startPing(peer) {
+  if (ui.busy) {
+    toast('正在执行其他操作', 'bad');
+    return;
+  }
+  if (!peer.online || !peer.ip || !PING_IP.test(peer.ip)) {
+    toast('该设备没有可用的 Ping 地址', 'bad');
+    return;
+  }
+  stopPing(false);
+  const state = { key: peer.key, ip: peer.ip, name: peer.name, samples: [], losses: 0, active: true };
+  ui.ping = state;
+  renderPeers();
+  pingTick(state);
+}
+
+function stopPing(rerender = true) {
+  if (ui.ping) ui.ping.active = false;
+  ui.ping = null;
+  if (pingTimer) {
+    clearTimeout(pingTimer);
+    pingTimer = null;
+  }
+  if (rerender) renderPeers();
+}
+
+async function pingTick(state) {
+  if (ui.ping !== state || !state.active) return;
+  let ms = null;
+  try {
+    const result = await callWebui(`ping ${state.ip}`, TIMEOUTS.ping);
+    if (result.exitCode !== 0 && /unknown|unsupported|usage|invalid operation/i.test(`${result.output || ''} ${result.error || ''}`)) {
+      stopPing();
+      toast('当前后端不支持设备 Ping', 'bad');
+      return;
+    }
+    if (result.exitCode === 0) ms = parsePingMs(result.output);
+  } catch (_) {
+    ms = null;
+  }
+  if (ui.ping !== state || !state.active) return;
+  state.samples.push(ms);
+  if (state.samples.length > PING_LIMIT) state.samples.shift();
+  if (ms == null) state.losses += 1;
+  updatePingPanel(state);
+  pingTimer = setTimeout(() => pingTick(state), PING_INTERVAL);
+}
+
+function buildPingPanel(state) {
+  const panel = document.createElement('div');
+  panel.className = 'ping-panel';
+
+  const stats = document.createElement('div');
+  stats.className = 'ping-stats';
+  for (const [cls, label] of [['ping-current', '当前'], ['ping-avg', '平均'], ['ping-lost', '丢失']]) {
+    const span = document.createElement('span');
+    const value = document.createElement('b');
+    value.className = cls;
+    value.textContent = '—';
+    const name = document.createElement('i');
+    name.textContent = label;
+    span.append(value, name);
+    stats.appendChild(span);
+  }
+
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 300 52');
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', `${state.name} 的 Ping 延迟曲线`);
+  const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  line.setAttribute('class', 'ping-line');
+  svg.appendChild(line);
+
+  const note = document.createElement('p');
+  note.className = 'ping-note';
+  note.textContent = '每 2 秒 Ping 一次，最多保留 30 次';
+
+  panel.append(stats, svg, note);
+  updatePingPanel(state, panel);
+  return panel;
+}
+
+function updatePingPanel(state, panel = el.peerList.querySelector('.ping-panel')) {
+  if (!panel) return;
+  const values = state.samples.filter((value) => Number.isFinite(value));
+  const last = state.samples.length ? state.samples[state.samples.length - 1] : null;
+  const current = panel.querySelector('.ping-current');
+  const average = panel.querySelector('.ping-avg');
+  const lost = panel.querySelector('.ping-lost');
+
+  current.textContent = state.samples.length === 0 ? '—' : (last == null ? '超时' : `${last.toFixed(1)} ms`);
+  average.textContent = values.length ? `${(values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1)} ms` : '—';
+  lost.textContent = String(state.losses);
+
+  const max = values.length ? Math.max(...values) : 0;
+  const scale = Math.max(50, Math.ceil(max / 20) * 20);
+  const width = 300;
+  const height = 52;
+  const pad = 6;
+  let path = '';
+  let pen = false;
+  const span = Math.max(1, Math.min(PING_LIMIT, state.samples.length) - 1);
+  state.samples.forEach((ms, index) => {
+    if (!Number.isFinite(ms)) {
+      pen = false;
+      return;
+    }
+    const x = (index / span) * width;
+    const y = height - pad - (ms / scale) * (height - pad * 2);
+    path += `${pen ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`;
+    pen = true;
+  });
+  panel.querySelector('.ping-line').setAttribute('d', path);
 }
 
 function relativeTime(value) {
@@ -585,9 +771,22 @@ function relativeTime(value) {
 
 /* Netcheck */
 
+function setNetcheckPending(pending) {
+  el.netcheckBtn.textContent = pending ? '测试中…' : '测试';
+  el.netcheckBtn.setAttribute('aria-busy', pending ? 'true' : 'false');
+  if (!pending) return;
+  if (el.netResult.hidden) {
+    el.netEmpty.textContent = '正在测试，最长约 30 秒…';
+    el.netEmpty.hidden = false;
+  } else {
+    el.netNote.textContent = '正在重新测试…';
+  }
+}
+
 async function runNetcheck() {
   if (ui.busy || !bridge || !ui.payload || !ui.payload.running) return;
-  setBusy('正在测试网络延迟');
+  setBusy('正在测试网络', '测试 DERP 延迟，最长约 30 秒');
+  setNetcheckPending(true);
   try {
     const result = await callWebui('netcheck', TIMEOUTS.netcheck);
     renderNetcheck(result);
@@ -595,7 +794,14 @@ async function runNetcheck() {
   } catch (error) {
     toast(error.message, 'bad');
     setBanner(error.message, 'bad');
+    if (el.netResult.hidden) {
+      el.netEmpty.textContent = '测试失败，请重试';
+      el.netEmpty.hidden = false;
+    } else {
+      el.netNote.textContent = '测试失败，请重试';
+    }
   } finally {
+    setNetcheckPending(false);
     clearBusy();
   }
 }
@@ -611,7 +817,7 @@ function renderNetcheck(result) {
   el.netRaw.parentElement.open = failed;
 
   const latencies = [];
-  const linePattern = /^\s*-\s*([A-Za-z0-9]{2,8}):\s*([0-9.]+)\s*ms(?:\s*\(([^)]*)\))?/gm;
+  const linePattern = /^\s*[-*]\s*([A-Za-z0-9][A-Za-z0-9_-]{1,23}):\s*([0-9.]+)\s*ms(?:\s*\(([^)]*)\))?/gm;
   let match;
   while ((match = linePattern.exec(output)) !== null) {
     const ms = Number(match[2]);
@@ -621,11 +827,13 @@ function renderNetcheck(result) {
   }
   latencies.sort((a, b) => a.ms - b.ms);
 
+  ui.netLatencies.clear();
+  for (const item of latencies) ui.netLatencies.set(item.code.toLowerCase(), item.ms);
+
   const nearestMatch = output.match(/Nearest DERP:\s*([^\n]+)/i);
   const nearest = nearestMatch ? nearestMatch[1].trim() : '';
 
   el.netList.replaceChildren();
-  const fastest = latencies.length ? latencies[0].ms : 0;
 
   for (const item of latencies) {
     const row = document.createElement('li');
@@ -645,8 +853,8 @@ function renderNetcheck(result) {
     const bar = document.createElement('span');
     bar.className = 'bar';
     const fill = document.createElement('i');
-    const quality = fastest > 0 ? Math.max(8, Math.round((fastest / Math.max(item.ms, 0.1)) * 100)) : 8;
-    fill.style.width = `${Math.min(quality, 100)}%`;
+    const width = Math.max(4, Math.min(100, Math.round((item.ms / 300) * 100)));
+    fill.style.width = `${width}%`;
     fill.className = item.ms < 50 ? 'fast' : item.ms < 120 ? 'mid' : 'slow';
     bar.appendChild(fill);
 
@@ -661,10 +869,11 @@ function renderNetcheck(result) {
   }
 
   const notes = [];
-  if (failed) notes.push(`netcheck 退出码 ${result.exitCode}。`);
+  if (failed) notes.push(`netcheck 退出码 ${result.exitCode}`);
   if (nearest) notes.push(`最近 DERP：${nearest}`);
-  if (!latencies.length) notes.push('未解析到 DERP 延迟，请查看原始输出。');
+  if (!latencies.length) notes.push('未解析到 DERP 延迟，请查看原始输出');
   el.netNote.textContent = notes.join(' ');
+  renderPeers();
 }
 
 /* Actions */
@@ -680,8 +889,12 @@ function showOutput(title, text, failed) {
 
 async function runAction(sub, label) {
   if (ui.busy || !bridge) return;
-  const busyText = { start: '正在启动服务', stop: '正在停止服务', repair: '正在修复路由' }[sub] || '正在执行';
-  setBusy(busyText);
+  const busy = {
+    start: ['正在启动服务', '正在启动 tailscaled'],
+    stop: ['正在停止服务', '正在停止 tailscaled'],
+    repair: ['正在修复路由', '重建路由与优先级规则'],
+  }[sub] || ['正在执行', '请稍候'];
+  setBusy(busy[0], busy[1]);
   let result;
   try {
     result = await callWebui(sub, TIMEOUTS.control);
@@ -701,10 +914,10 @@ async function runAction(sub, label) {
 
 async function runUpdate() {
   if (ui.busy || !bridge) return;
-  const ok = window.confirm('从官方源下载并替换 Tailscale 二进制，可能需要数分钟。运行中的服务会短暂重启。继续？');
+  const ok = window.confirm('从官方源下载并替换 Tailscale 二进制，可能需要数分钟；运行中的服务会短暂重启，继续？');
   if (!ok) return;
 
-  setBusy('正在下载并安装更新，可能需要数分钟');
+  setBusy('正在安装更新', '下载替换可能需要数分钟');
   let result;
   try {
     result = await callWebui('update', TIMEOUTS.update);
@@ -719,7 +932,59 @@ async function runUpdate() {
   const failed = result.exitCode !== 0;
   showOutput('安装更新', result.output, failed);
   toast(failed ? `更新失败（exit ${result.exitCode}）` : '更新完成', failed ? 'bad' : 'ok');
+  if (!failed) clearUpdateNote();
   await refreshStatus();
+}
+
+function normVersion(value) {
+  const match = String(value == null ? '' : value).match(/\d+\.\d+\.\d+/);
+  return match ? match[0] : '';
+}
+
+function compareVersions(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i += 1) {
+    if (pa[i] !== pb[i]) return (pa[i] || 0) - (pb[i] || 0);
+  }
+  return 0;
+}
+
+function showUpdateNote(text, tone) {
+  el.updateNote.textContent = text;
+  el.updateNote.className = 'version-note' + (tone ? ' ' + tone : '');
+  el.updateNote.hidden = false;
+}
+
+function clearUpdateNote() {
+  ui.updateCheckedFor = '';
+  el.updateNote.hidden = true;
+  el.updateNote.textContent = '';
+}
+
+async function checkUpdate() {
+  if (ui.busy || !bridge || !ui.payload || !ui.payload.installed) return;
+  setBusy('正在检查更新', '获取最新稳定版本');
+  try {
+    const result = await callWebui('check-update', TIMEOUTS.checkUpdate);
+    const current = normVersion(result.current || ui.payload.version);
+    const stable = String(result.output || '').match(/Stable-(\d+\.\d+\.\d+)/);
+    const latest = normVersion(result.latest || (stable ? stable[1] : ''));
+    if (!latest) {
+      showUpdateNote('无法检查更新', 'bad');
+      return;
+    }
+    const available = typeof result.available === 'boolean'
+      ? result.available
+      : Boolean(current && compareVersions(latest, current) > 0);
+    showUpdateNote(available ? `新版本 ${latest}` : '无可用更新', available ? 'available' : 'current');
+    ui.updateCheckedFor = current;
+  } catch (error) {
+    showUpdateNote('无法检查更新', 'bad');
+    toast(error.message, 'bad');
+  } finally {
+    clearBusy();
+  }
 }
 
 /* Login */
@@ -727,8 +992,8 @@ async function runUpdate() {
 async function runLogin() {
   if (ui.busy || !bridge || !ui.payload || !ui.payload.running) return;
   setAuthUrl(null);
-  el.authDesc.textContent = '正在获取授权链接，最长约 65 秒。';
-  setBusy('正在登录并等待授权');
+  el.authDesc.textContent = '正在获取授权链接，最长约 65 秒';
+  setBusy('正在登录并等待授权', '最长约 65 秒，请勿关闭页面');
   const probeTimer = startAuthProbe();
   let result;
   try {
@@ -743,7 +1008,10 @@ async function runLogin() {
   }
 
   const url = sanitizeAuthUrl(result.url) || extractAuthUrl(result.output);
-  if (url) setAuthUrl(url);
+  if (url) {
+    setAuthUrl(url);
+    el.authDesc.textContent = '在浏览器完成授权后返回本页刷新；若路由未生效，点「修复路由」';
+  }
   const failed = result.exitCode !== 0;
   if (result.output) showOutput('登录', result.output, failed && !url);
   toast(
@@ -768,7 +1036,7 @@ function startAuthProbe() {
       const url = sanitizeAuthUrl(data.status && data.status.AuthURL);
       if (url && url !== ui.authUrl) {
         setAuthUrl(url);
-        el.authDesc.textContent = '在浏览器完成授权后返回本页刷新；若路由未生效，点「修复路由」。';
+        el.authDesc.textContent = '在浏览器完成授权后返回本页刷新；若路由未生效，点「修复路由」';
       }
     } catch (_) {
       /* the login command itself records the useful error */
@@ -783,11 +1051,16 @@ function startAuthProbe() {
 function bindEvents() {
   el.refreshBtn.addEventListener('click', refreshStatus);
   el.installRefresh.addEventListener('click', refreshStatus);
+  el.hostRefresh.addEventListener('click', () => window.location.reload());
   el.installUpdateBtn.addEventListener('click', runUpdate);
   el.loginBtn.addEventListener('click', runLogin);
   el.authCopy.addEventListener('click', copyAuthUrl);
-  el.startBtn.addEventListener('click', () => runAction('start', '启动'));
-  el.stopBtn.addEventListener('click', () => runAction('stop', '停止'));
+  el.powerBtn.addEventListener('click', () => {
+    if (!ui.payload) return;
+    if (ui.payload.running) runAction('stop', '停止');
+    else runAction('start', '启动');
+  });
+  el.checkUpdateBtn.addEventListener('click', checkUpdate);
   el.repairBtn.addEventListener('click', () => runAction('repair', '修复路由'));
   el.updateBtn.addEventListener('click', runUpdate);
   el.netcheckBtn.addEventListener('click', runNetcheck);
@@ -802,14 +1075,12 @@ async function boot() {
   }
 
   if (!bridge) {
-    el.hostLabel.textContent = '未检测到宿主';
     el.footBridge.textContent = 'Tailscale Box';
     showScreen('host');
     syncControls();
     return;
   }
 
-  el.hostLabel.textContent = `${bridge.label} · Root WebUI`;
   el.footBridge.textContent = `Tailscale Box · ${bridge.label}`;
   showScreen('app');
   syncControls();

@@ -1,7 +1,7 @@
 id=tailscale_direct
 name=Tailscale Box
-version=1.1.0
-versionCode=110
+version=1.1.1
+versionCode=111
 author=Bryce
 description=Native tailscaled TUN and Tailnet-IP routing, can coexist with box-proxy liked modules. WebUI and optional Tailscale binaries.
 action=action.sh
