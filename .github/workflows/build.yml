@@ -81,4 +81,4 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
           COMMIT: ${{ github.sha }}
         run: |
-          gh release create "v$VERSION" dist/* --target "$COMMIT" --title "Tailscale Box $VERSION" --notes 'ARM64: choose minimal to install Tailscale later with Action/WebUI, or bundled for the official stable version resolved at build time. SHA256SUMS verifies the module ZIPs. See README for manager compatibility.'
+          gh release create "v$VERSION" dist/* --target "$COMMIT" --title "Tailscale Box $VERSION" --notes 'ARM64: choose minimal to install Tailscale later with Action/WebUI, or bundled for the official stable version resolved at build time. Manager updates preserve the installed package flavor: minimal to minimal, bundled to bundled. SHA256SUMS verifies the module ZIPs.'

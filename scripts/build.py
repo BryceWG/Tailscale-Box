@@ -13,6 +13,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 STABLE = "https://pkgs.tailscale.com/stable/"
+REPOSITORY = "https://github.com/BryceWG/Tailscale-Box"
 FILES = (
     "module.prop", "customize.sh", "action.sh", "ctl.sh", "update.sh",
     "webui.sh", "service.sh", "uninstall.sh", "README.md",
@@ -62,6 +63,11 @@ def latest_binaries():
 def build(variant, output, root=ROOT):
     version = metadata(root)["version"]
     files = {name: (root / name).read_bytes() for name in FILES}
+    manifest_name = "update.json" if variant == "minimal" else "update-bundled.json"
+    update_url = f"{REPOSITORY}/releases/latest/download/{manifest_name}"
+    prop_lines = files["module.prop"].decode().splitlines()
+    prop_lines = [line for line in prop_lines if not line.startswith("updateJson=")]
+    files["module.prop"] = ("\n".join(prop_lines) + f"\nupdateJson={update_url}\n").encode()
     for folder in ("META-INF", "webroot"):
         for path in sorted((root / folder).rglob("*")):
             if path.is_file():
@@ -83,6 +89,19 @@ def build(variant, output, root=ROOT):
             executable = name.endswith(".sh") or name.startswith("bin/") or name.endswith("/update-binary")
             info.external_attr = (stat.S_IFREG | (0o755 if executable else 0o644)) << 16
             archive.writestr(info, content, compress_type=zipfile.ZIP_DEFLATED)
+    update = {
+        "version": version,
+        "versionCode": int(metadata(root)["versionCode"]),
+        "zipUrl": f"{REPOSITORY}/releases/download/v{version}/{target.name}",
+        "changelog": f"{REPOSITORY}/releases/download/v{version}/changelog.md",
+    }
+    (output / manifest_name).write_text(json.dumps(update, indent=2) + "\n")
+    (output / "changelog.md").write_text(
+        f"# Tailscale Box {version}\n\n"
+        "模块管理器按已安装包类型更新：minimal 下载 minimal，bundled 下载 bundled。\n\n"
+        "minimal 升级保留已有 Tailscale 二进制；bundled 使用新包附带的二进制。两者均保留身份数据。\n\n"
+        f"[版本说明]({REPOSITORY}/releases/tag/v{version})\n"
+    )
     return target
 
 

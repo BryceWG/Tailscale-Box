@@ -495,7 +495,9 @@ function renderPeers() {
         ? peer.TailscaleIPs.filter((ip) => typeof ip === 'string')
         : [];
       const dnsName = stripDot(peer.DNSName);
-      const name = peer.HostName || dnsName || ips[0] || '未知设备';
+      const machineName = dnsName ? dnsName.split('.')[0] : '';
+      const hostName = typeof peer.HostName === 'string' ? peer.HostName.trim() : '';
+      const name = machineName || hostName || ips[0] || '未知设备';
       return {
         name,
         key: typeof peer.ID === 'string' ? peer.ID : `${name}|${ips.join(',')}`,

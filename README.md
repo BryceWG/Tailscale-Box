@@ -1,4 +1,4 @@
-# Tailscale Box 1.1.1 (ARM64)
+# Tailscale Box 1.1.2 (ARM64)
 
 Android Root 模块，使用原生 tailscale0 TUN：应用 → 系统路由 → tailscaled → 对端。
 使用 tailscaled 用户态 WireGuard，不使用 Android VPNService。仅支持 ARM64。
@@ -79,6 +79,8 @@ uv run --no-project python -m unittest discover -s tests
 输出在 `dist/`。bundled 在每次构建时请求[官方 stable 元数据](https://pkgs.tailscale.com/stable/?mode=json)，不复用仓库里旧的 `bin/`；校验官方 SHA256，ZIP 的 `PROVENANCE.txt` 记录版本、来源与哈希。minimal 不包含仓库现有二进制。
 
 `.github/workflows/build.yml` 在 push 改动 `module.prop` 时比较推送前后的 `version` 和 `versionCode`，任一变化才打包。请发布时同时递增两者。首次推送也构建；仅改描述不构建。支持 workflow_dispatch 手动构建，全部运行提供 Actions artifact；默认分支版本更新还会创建 `v版本` Release，附双 ZIP 与 SHA256SUMS。同名 Release 已存在会报错，发布必须使用新版本号。
+
+构建按包类型写入 `module.prop` 的 `updateJson`：minimal 指向最新 Release 的 `update.json`，bundled 指向 `update-bundled.json`。两个 JSON 的 `zipUrl` 分别指向同一版本对应类型的 ARM64 ZIP，因此管理器更新会保持包类型。minimal 升级保留已安装的 Tailscale 二进制，bundled 使用新包附带的版本；两者均保留身份数据。更新检查使用 versionCode 比较，发版需递增。手动 workflow_dispatch 只构建 artifact，不发布更新源。
 
 首次使用需初始化 Git、推送到 GitHub，并在仓库设置中允许 Actions 发布 Release（contents: write）。本地任务没有自动添加远程地址或推送。
 
