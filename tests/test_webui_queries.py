@@ -3,6 +3,10 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from http.server import BaseHTTPRequestHandler
+import socketserver
+import threading
+from urllib.parse import parse_qs
 import tempfile
 import unittest
 
@@ -62,19 +66,61 @@ exit "${CURL_RC:-0}"''')
         self.env['CURL_RC'] = '28'
         self.assertEqual(self.query('check-update')['exitCode'], 28)
 
-    def test_ping_bounded_unlocked_and_cli_failure_preserved(self):
-        self.executable('ctl.sh', '''printf '%s\\n' "$@" > "$FIXTURE/args"
-echo 'pong from peer (100.64.0.2) via DERP(fra) in 15ms'
-exit "${PING_RC:-0}"''')
-        for address in ('100.64.0.2', 'fd7a:115c:a1e0::2'):
-            result = self.query('ping', address)
-            self.assertEqual(result['exitCode'], 0)
-            self.assertIn('in 15ms', result['output'])
-            self.assertEqual((self.path / 'args').read_text().splitlines(), ['ts', 'ping', '--c', '1', '--timeout=3s', '--until-direct=false', address])
-            self.assertEqual((self.path / 'timeout').read_text(), '6\n')
-        self.env['PING_RC'] = '124'
-        self.assertEqual(self.query('ping', '100.64.0.2')['exitCode'], 124)
-        (self.path / 'args').unlink()
-        for args in ((), ('--help',), ('100.64.0.2;touch /tmp/unsafe',), ('100.64.0.2', 'extra')):
-            self.assertNotEqual(self.query('ping', *args)['exitCode'], 0)
-        self.assertFalse((self.path / 'args').exists())
+    def test_ping_unix_api_paths_and_failures_without_cli_delay(self):
+        observed = []
+        replies = [
+            (200, {'LatencySeconds': 0.015, 'Endpoint': '192.0.2.2:41641', 'PeerRelay': '', 'DERPRegionID': 0, 'Err': ''}),
+            (200, {'LatencySeconds': 0.023, 'Endpoint': '', 'PeerRelay': '192.0.2.3:40000:vni:1', 'DERPRegionID': 0, 'Err': ''}),
+            (200, {'LatencySeconds': 0.090, 'Endpoint': '', 'PeerRelay': '', 'DERPRegionID': 900, 'DERPRegionCode': 'aliyun-gz', 'Err': ''}),
+            (200, {'LatencySeconds': 0, 'Err': 'no matching peer'}),
+            (500, {'error': 'daemon failure'}),
+        ]
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                observed.append((self.path, self.headers['Host'], parse_qs(self.rfile.read(int(self.headers['Content-Length'])).decode())))
+                status, body = replies.pop(0)
+                content = json.dumps(body).encode() if status == 200 else b''
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(content)))
+                self.end_headers()
+                if content:
+                    self.wfile.write(content)
+
+            def log_message(self, *args):
+                pass
+
+        with socketserver.UnixStreamServer(str(self.path / 'data/tailscaled.sock'), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                # A bogus proxy must not affect the local Unix-socket transport.
+                self.env['http_proxy'] = 'http://127.0.0.1:1'
+                addresses = ['100.64.0.2', 'fd7a:115c:a1e0::2', '100.64.0.3']
+                for address in addresses:
+                    result = self.query('ping', address)
+                    self.assertEqual(result['exitCode'], 0)
+                    self.assertEqual(result['result']['Err'], '')
+                    self.assertEqual(observed[-1], ('/localapi/v0/ping', 'local-tailscaled.sock', {'ip': [address], 'type': ['disco']}))
+                result = self.query('ping', '100.64.0.2')
+                self.assertEqual(result['result']['Err'], 'no matching peer')
+                result = self.query('ping', '100.64.0.2')
+                self.assertNotEqual(result['exitCode'], 0)
+                self.assertIsNone(result['result'])
+                self.assertIn('500', result['output'])
+                count = len(observed)
+                for args in ((), ('--help',), ('100.64.0.2;touch /tmp/unsafe',), ('100.64.0.2', 'extra')):
+                    self.assertNotEqual(self.query('ping', *args)['exitCode'], 0)
+                self.assertEqual(len(observed), count)
+                self.assertFalse((self.path / 'timeout').exists())
+            finally:
+                server.shutdown()
+                thread.join()
+
+    def test_ping_curl_failure_is_reported_as_json(self):
+        self.executable('tools/curl', 'echo "request timed out" >&2\nexit 28')
+        result = self.query('ping', '100.64.0.2')
+        self.assertEqual(result['exitCode'], 28)
+        self.assertIsNone(result['result'])
+        self.assertIn('timed out', result['output'])

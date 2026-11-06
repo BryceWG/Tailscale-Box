@@ -3,6 +3,11 @@ MODDIR=${0%/*}
 DATA=/data/adb/tailscale-direct
 SOCK=$DATA/tailscaled.sock
 PIDFILE=$DATA/tailscaled.pid
+# The bundled binary is GOOS=linux. Its 0x80000 bypass rules route marked
+# sockets through main/default tables, empty on the reported Android device. Bind sockets
+# to Android's detected default interface instead. Set this to 0 to test the
+# legacy SO_MARK path on devices with a compatible routing policy.
+export TS_FORCE_LINUX_BIND_TO_DEVICE=${TS_FORCE_LINUX_BIND_TO_DEVICE:-1}
 mkdir -p "$DATA"
 chmod 700 "$DATA"
 if [ -s "$DATA/control-proxy" ]; then
@@ -81,8 +86,9 @@ case "$1" in
  restart) stop && start;;
  login) alive || { echo 'Start first'; exit 1; }; cli up --timeout=60s --accept-dns=false --accept-routes=false --netfilter-mode=off && routes;;
  repair) alive && routes;;
+ network-diagnose) shift; /system/bin/sh "$MODDIR/network-diagnose.sh" "$@";;
  status) alive && echo "PID $TS_PID" || echo 'Stopped'; cli status; ip -4 rule show; ip -4 route show table 52;;
  diagnose) "$MODDIR/bin/tailscaled" --version; cli status; cli netcheck; ip -4 route show table 52; ip -6 route show table 52; tail -n 50 "$DATA/daemon.log" | sed 's#https://login\.tailscale\.com/[^[:space:]"<>]*#[login URL redacted]#g; s#https://controlplane\.tailscale\.com/[^[:space:]"<>]*#[login URL redacted]#g';;
  ts) shift; cli "$@";;
- *) echo 'Usage: ctl.sh start|stop|restart|login|repair|status|diagnose|ts <args>'; exit 1;;
+ *) echo 'Usage: ctl.sh start|stop|restart|login|repair|status|diagnose|network-diagnose [peer-IP]|ts <args>'; exit 1;;
 esac

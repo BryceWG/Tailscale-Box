@@ -82,6 +82,9 @@ let bridge = null;
 let callbackSeq = 0;
 let toastTimer = null;
 let pingTimer = null;
+let peerViews = new Map();
+let netcheckTimer = null;
+let netcheckStartedAt = 0;
 
 /* Root bridge: KernelSU / APatch compatible exec(command, "{}", callback) */
 
@@ -486,6 +489,48 @@ async function copyAuthUrl() {
 
 /* Peers */
 
+function pingPathInfo(state) {
+  if (state.path) {
+    const note = state.path.note || '—';
+    return {
+      label: `${state.lastError ? '上次 ' : ''}${state.path.label}`,
+      note: state.lastError ? `${note} · 超时` : note,
+      cls: state.lastError ? 'timeout' : (state.path.kind === 'direct' ? 'direct' : ''),
+    };
+  }
+  if (state.probing) return { label: '正在探测', note: '等待响应', cls: 'probing' };
+  if (state.lastError) return { label: '超时', note: '未收到响应', cls: 'timeout' };
+  if (state.samples.length) return { label: '路径未知', note: '旧版输出', cls: '' };
+  return { label: '正在探测', note: '等待响应', cls: 'probing' };
+}
+
+function peerPathInfo(peer) {
+  if (ui.ping && ui.ping.key === peer.key) return pingPathInfo(ui.ping);
+  if (!peer.online) return { label: '离线', note: '—', cls: 'offline' };
+  if (!peer.active) return { label: '空闲', note: '—', cls: '' };
+  if (peer.peerRelay) return { label: 'Peer relay', note: peer.peerRelay, cls: '' };
+  if (peer.direct) return { label: '直连', note: peer.curAddr || '—', cls: 'direct' };
+  if (peer.relay) {
+    const latency = relayLatency(peer.relay);
+    return {
+      label: `DERP ${peer.relay.toUpperCase()}`,
+      note: latency != null ? `${latency.toFixed(1)} ms` : '延迟未知',
+      cls: '',
+    };
+  }
+  return { label: '未知', note: '—', cls: '' };
+}
+
+function updatePingRow(state) {
+  const view = peerViews.get(state.key);
+  if (!view) return;
+  const info = pingPathInfo(state);
+  view.label.textContent = info.label;
+  view.label.className = 'path-label' + (info.cls ? ` ${info.cls}` : '');
+  view.note.textContent = info.note;
+  view.note.title = info.note;
+}
+
 function renderPeers() {
   const raw = ui.status && ui.status.Peer && typeof ui.status.Peer === 'object' ? ui.status.Peer : {};
   const peers = Object.values(raw)
@@ -506,7 +551,9 @@ function renderPeers() {
         ips: ips.join(', '),
         os: typeof peer.OS === 'string' ? peer.OS : '',
         online: Boolean(peer.Online),
+        active: Boolean(peer.Active),
         direct: Boolean(peer.CurAddr),
+        peerRelay: typeof peer.PeerRelay === 'string' ? peer.PeerRelay : '',
         relay: typeof peer.Relay === 'string' ? peer.Relay : '',
         curAddr: typeof peer.CurAddr === 'string' ? peer.CurAddr : '',
         exitNode: Boolean(peer.ExitNode),
@@ -521,9 +568,11 @@ function renderPeers() {
   if (ui.ping && !peers.some((peer) => peer.key === ui.ping.key)) stopPing(false);
 
   const online = peers.filter((peer) => peer.online).length;
-  const direct = peers.filter((peer) => peer.online && peer.direct).length;
-  const relayed = peers.filter((peer) => peer.online && !peer.direct).length;
+  const direct = peers.filter((peer) => peer.online && peer.active && peer.direct && !peer.peerRelay).length;
+  const peerRelayed = peers.filter((peer) => peer.online && peer.active && peer.peerRelay).length;
+  const relayed = peers.filter((peer) => peer.online && peer.active && !peer.direct && !peer.peerRelay && peer.relay).length;
   const summary = [`${online} 在线`, `${direct} 直连`];
+  if (peerRelayed) summary.push(`${peerRelayed} Peer relay`);
   if (relayed) summary.push(`${relayed} DERP`);
 
   el.peerCount.textContent = String(peers.length);
@@ -531,7 +580,7 @@ function renderPeers() {
   el.peerEmpty.textContent = '还没有其他设备加入这个 Tailnet';
   el.peerEmpty.hidden = peers.length > 0;
   el.peerList.replaceChildren();
-
+  peerViews = new Map();
   for (const peer of peers) {
     const item = document.createElement('li');
     item.className = 'peer';
@@ -576,34 +625,18 @@ function renderPeers() {
 
     const path = document.createElement('div');
     path.className = 'peer-path';
+    const info = peerPathInfo(peer);
     const label = document.createElement('span');
-    if (!peer.online) {
-      label.className = 'path-label offline';
-      label.textContent = '离线';
-    } else if (peer.direct) {
-      label.className = 'path-label direct';
-      label.textContent = '直连';
-    } else if (peer.relay) {
-      label.className = 'path-label';
-      label.textContent = `DERP ${peer.relay.toUpperCase()}`;
-    } else {
-      label.className = 'path-label';
-      label.textContent = '未知';
-    }
+    label.className = 'path-label' + (info.cls ? ` ${info.cls}` : '');
+    label.textContent = info.label;
     path.appendChild(label);
 
-    let note = '—';
-    if (peer.online && peer.direct) {
-      note = peer.curAddr || '—';
-    } else if (peer.online && peer.relay) {
-      const latency = relayLatency(peer.relay);
-      note = latency != null ? `${latency.toFixed(1)} ms` : '延迟未知';
-    }
     const noteEl = document.createElement('span');
     noteEl.className = 'path-note';
-    noteEl.textContent = note;
-    noteEl.title = note;
+    noteEl.textContent = info.note;
+    noteEl.title = info.note;
     path.appendChild(noteEl);
+    peerViews.set(peer.key, { label, note: noteEl });
     const pingActive = Boolean(ui.ping && ui.ping.key === peer.key);
     const pingBtn = document.createElement('button');
     pingBtn.type = 'button';
@@ -634,13 +667,104 @@ function relayLatency(relay) {
   return Number.isFinite(ms) ? ms : null;
 }
 
-const PING_INTERVAL = 1500;
+const PING_INTERVAL = 1000;
 const PING_LIMIT = 30;
 const PING_IP = /^[0-9a-fA-F:.]{3,45}$/;
 
 function parsePingMs(output) {
   const matches = [...String(output == null ? '' : output).matchAll(/\bin\s+([0-9.]+)\s*ms\b/gi)];
   return matches.length ? Number(matches[matches.length - 1][1]) : null;
+}
+
+function pathFromPing(ping) {
+  const peerRelay = typeof ping.PeerRelay === 'string' ? ping.PeerRelay.trim() : '';
+  if (peerRelay) return { kind: 'peer-relay', label: 'Peer relay', note: peerRelay };
+
+  const regionId = Number(ping.DERPRegionID) || 0;
+  const regionCode = typeof ping.DERPRegionCode === 'string' ? ping.DERPRegionCode.trim().toUpperCase() : '';
+  if (regionId > 0 || regionCode) {
+    return {
+      kind: 'derp',
+      label: `DERP ${regionCode || '#' + regionId}`,
+      note: regionId ? `region ${regionId}` : '',
+    };
+  }
+
+  const endpoint = typeof ping.Endpoint === 'string' ? ping.Endpoint.trim() : '';
+  if (endpoint) return { kind: 'direct', label: '直连', note: endpoint };
+  return null;
+}
+
+function pathFromLegacyOutput(output) {
+  const lines = String(output == null ? '' : output)
+    .split(/\r?\n/)
+    .filter((line) => /\bin\s+[0-9.]+\s*ms\b/i.test(line));
+  const line = lines[lines.length - 1] || '';
+  const match = line.match(/\bvia\s+(.+?)\s+in\s+[0-9.]+\s*ms\b/i);
+  if (!match) return null;
+
+  const via = match[1].trim();
+  const derp = via.match(/^DERP\s*\(([^)]+)\)/i);
+  if (derp) return { kind: 'derp', label: `DERP ${derp[1].toUpperCase()}`, note: '' };
+
+  const peer = via.match(/^peer[-\s]?relay\s*(?:\(([^)]+)\))?/i);
+  if (peer) return { kind: 'peer-relay', label: 'Peer relay', note: peer[1] || via };
+
+  if (/^[0-9a-fA-F:.[\]]+:\d+$/.test(via) || /^[0-9a-fA-F:.]+$/.test(via)) {
+    return { kind: 'direct', label: '直连', note: via };
+  }
+  return null;
+}
+
+function parsePingPayload(result) {
+  let ping = result && result.result;
+  if (typeof ping === 'string') {
+    try {
+      ping = JSON.parse(ping);
+    } catch (_) {
+      ping = null;
+    }
+  }
+  if (!ping || typeof ping !== 'object' || Array.isArray(ping)) ping = null;
+
+  if (ping) {
+    const error = ping.Err == null ? '' : String(ping.Err).trim();
+    if (error) return { ms: null, path: null, error };
+
+    const rawMs = ping.LatencySeconds;
+    let ms = rawMs == null || rawMs === '' ? null : Number(rawMs);
+    if (ms == null || !Number.isFinite(ms) || ms <= 0) ms = null;
+    else ms *= 1000;
+    if (ms == null) ms = parsePingMs(result.output);
+    if (ms == null) return { ms: null, path: null, error: '没有延迟数据' };
+    return { ms, path: pathFromPing(ping) || pathFromLegacyOutput(result.output), error: '' };
+  }
+
+  if (Number(result && result.exitCode) !== 0) {
+    const error = String((result && (result.output || result.error)) || '').trim();
+    return { ms: null, path: null, error: error || 'Ping 失败' };
+  }
+
+  const output = result && result.output;
+  const ms = parsePingMs(output);
+  return { ms, path: pathFromLegacyOutput(output), error: ms == null ? '没有延迟数据' : '' };
+}
+
+function prefersReducedMotion() {
+  return Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+
+function waitForPaint() {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    requestAnimationFrame(() => requestAnimationFrame(finish));
+    setTimeout(finish, 100);
+  });
 }
 
 function startPing(peer) {
@@ -653,14 +777,27 @@ function startPing(peer) {
     return;
   }
   stopPing(false);
-  const state = { key: peer.key, ip: peer.ip, name: peer.name, samples: [], losses: 0, active: true };
+  const state = {
+    key: peer.key,
+    ip: peer.ip,
+    name: peer.name,
+    samples: [],
+    losses: 0,
+    active: true,
+    probing: true,
+    path: null,
+    lastError: '',
+  };
   ui.ping = state;
   renderPeers();
   pingTick(state);
 }
 
 function stopPing(rerender = true) {
-  if (ui.ping) ui.ping.active = false;
+  if (ui.ping) {
+    ui.ping.active = false;
+    ui.ping.probing = false;
+  }
   ui.ping = null;
   if (pingTimer) {
     clearTimeout(pingTimer);
@@ -671,24 +808,40 @@ function stopPing(rerender = true) {
 
 async function pingTick(state) {
   if (ui.ping !== state || !state.active) return;
-  let ms = null;
+  const started = performance.now();
+  state.probing = true;
+  if (state.samples.length === 0) {
+    await waitForPaint();
+    if (ui.ping !== state || !state.active) return;
+  }
+  let outcome = { ms: null, path: null, error: 'Ping 超时' };
   try {
     const result = await callWebui(`ping ${state.ip}`, TIMEOUTS.ping);
-    if (result.exitCode !== 0 && /unknown|unsupported|usage|invalid operation/i.test(`${result.output || ''} ${result.error || ''}`)) {
+    if (ui.ping !== state || !state.active) return;
+    if (Number(result.exitCode) !== 0 && /unknown|unsupported|usage|invalid operation/i.test(`${result.output || ''} ${result.error || ''}`)) {
       stopPing();
       toast('当前后端不支持设备 Ping', 'bad');
       return;
     }
-    if (result.exitCode === 0) ms = parsePingMs(result.output);
-  } catch (_) {
-    ms = null;
+    outcome = parsePingPayload(result);
+  } catch (error) {
+    if (ui.ping !== state || !state.active) return;
+    outcome = { ms: null, path: null, error: error.message || 'Ping 超时' };
   }
+
+  // A stopped or replaced session must ignore its late reply.
   if (ui.ping !== state || !state.active) return;
-  state.samples.push(ms);
+  state.probing = false;
+  state.samples.push(outcome.ms);
   if (state.samples.length > PING_LIMIT) state.samples.shift();
-  if (ms == null) state.losses += 1;
+  if (outcome.ms == null) state.losses += 1;
+  state.lastError = outcome.error || '';
+  if (outcome.path) state.path = outcome.path;
   updatePingPanel(state);
-  pingTimer = setTimeout(() => pingTick(state), PING_INTERVAL);
+  updatePingRow(state);
+
+  const elapsed = performance.now() - started;
+  pingTimer = setTimeout(() => pingTick(state), Math.max(0, PING_INTERVAL - elapsed));
 }
 
 function buildPingPanel(state) {
@@ -708,20 +861,33 @@ function buildPingPanel(state) {
     stats.appendChild(span);
   }
 
+  const route = document.createElement('p');
+  route.className = 'ping-route';
+  const routeLabel = document.createElement('b');
+  routeLabel.textContent = '正在探测';
+  const routeNote = document.createElement('span');
+  route.append(routeLabel, routeNote);
+
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'ping-chart');
   svg.setAttribute('viewBox', '0 0 300 52');
   svg.setAttribute('preserveAspectRatio', 'none');
   svg.setAttribute('role', 'img');
   svg.setAttribute('aria-label', `${state.name} 的 Ping 延迟曲线`);
   const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   line.setAttribute('class', 'ping-line');
-  svg.appendChild(line);
+  line.setAttribute('pathLength', '1');
+  const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  dot.setAttribute('class', 'ping-dot');
+  dot.setAttribute('r', '2.4');
+  dot.style.display = 'none';
+  svg.append(line, dot);
 
   const note = document.createElement('p');
   note.className = 'ping-note';
-  note.textContent = '每 2 秒 Ping 一次，最多保留 30 次';
+  note.textContent = '每秒 Ping 一次 · 最多 30 次 · 超时留缺口';
 
-  panel.append(stats, svg, note);
+  panel.append(stats, route, svg, note);
   updatePingPanel(state, panel);
   return panel;
 }
@@ -734,29 +900,92 @@ function updatePingPanel(state, panel = el.peerList.querySelector('.ping-panel')
   const average = panel.querySelector('.ping-avg');
   const lost = panel.querySelector('.ping-lost');
 
-  current.textContent = state.samples.length === 0 ? '—' : (last == null ? '超时' : `${last.toFixed(1)} ms`);
+  current.textContent = state.samples.length === 0
+    ? (state.probing ? '探测中' : '—')
+    : (last == null ? '超时' : `${last.toFixed(1)} ms`);
   average.textContent = values.length ? `${(values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1)} ms` : '—';
   lost.textContent = String(state.losses);
+
+  const routeLabel = panel.querySelector('.ping-route b');
+  const routeNote = panel.querySelector('.ping-route span');
+  if (state.path) {
+    routeLabel.textContent = `${state.lastError ? '上次 ' : ''}${state.path.label}`;
+    routeNote.textContent = (state.path.note ? ` · ${state.path.note}` : '') + (state.lastError ? ' · 超时' : '');
+  } else if (state.lastError) {
+    routeLabel.textContent = '路径未知';
+    routeNote.textContent = ' · 未获取';
+  } else if (state.probing) {
+    routeLabel.textContent = '正在探测';
+    routeNote.textContent = ' · 等待响应';
+  } else {
+    routeLabel.textContent = '路径未知';
+    routeNote.textContent = '';
+  }
 
   const max = values.length ? Math.max(...values) : 0;
   const scale = Math.max(50, Math.ceil(max / 20) * 20);
   const width = 300;
   const height = 52;
   const pad = 6;
-  let path = '';
-  let pen = false;
-  const span = Math.max(1, Math.min(PING_LIMIT, state.samples.length) - 1);
+  const span = PING_LIMIT - 1;
+  const runs = [];
+  let run = [];
+
+  const flush = () => {
+    if (!run.length) return;
+    runs.push(run);
+    run = [];
+  };
+
   state.samples.forEach((ms, index) => {
     if (!Number.isFinite(ms)) {
-      pen = false;
+      flush();
       return;
     }
-    const x = (index / span) * width;
-    const y = height - pad - (ms / scale) * (height - pad * 2);
-    path += `${pen ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`;
-    pen = true;
+    run.push({
+      x: (index / span) * width,
+      y: height - pad - (ms / scale) * (height - pad * 2),
+    });
   });
-  panel.querySelector('.ping-line').setAttribute('d', path);
+  flush();
+
+  // Horizontal-tangent cubic joins stay inside each pair's value range.
+  let path = '';
+  for (const points of runs) {
+    if (points.length === 1) {
+      path += `M${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)} l0.01 0`;
+      continue;
+    }
+    path += `M${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+    for (let i = 1; i < points.length; i += 1) {
+      const prev = points[i - 1];
+      const point = points[i];
+      const dx = (point.x - prev.x) / 3;
+      path += ` C${(prev.x + dx).toFixed(1)} ${prev.y.toFixed(1)} ${(point.x - dx).toFixed(1)} ${point.y.toFixed(1)} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`;
+    }
+  }
+
+  const line = panel.querySelector('.ping-line');
+  line.setAttribute('d', path);
+  const lastRun = runs.length ? runs[runs.length - 1] : null;
+  const lastPoint = lastRun ? lastRun[lastRun.length - 1] : null;
+  const dot = panel.querySelector('.ping-dot');
+  const newest = state.samples.length ? state.samples[state.samples.length - 1] : null;
+  if (lastPoint) {
+    dot.setAttribute('cx', lastPoint.x.toFixed(1));
+    dot.setAttribute('cy', lastPoint.y.toFixed(1));
+    dot.style.display = '';
+  } else {
+    dot.style.display = 'none';
+  }
+  // Keep the historical line intact; only the newest real sample pulses.
+  if (!prefersReducedMotion() && lastPoint && Number.isFinite(newest)) {
+    dot.classList.remove('draw');
+    dot.getBoundingClientRect();
+    dot.classList.add('draw');
+  } else {
+    dot.classList.remove('draw');
+  }
 }
 
 function relativeTime(value) {
@@ -774,21 +1003,42 @@ function relativeTime(value) {
 /* Netcheck */
 
 function setNetcheckPending(pending) {
-  el.netcheckBtn.textContent = pending ? '测试中…' : '测试';
-  el.netcheckBtn.setAttribute('aria-busy', pending ? 'true' : 'false');
-  if (!pending) return;
-  if (el.netResult.hidden) {
-    el.netEmpty.textContent = '正在测试，最长约 30 秒…';
-    el.netEmpty.hidden = false;
-  } else {
-    el.netNote.textContent = '正在重新测试…';
+  if (pending) {
+    clearInterval(netcheckTimer);
+    netcheckStartedAt = Date.now();
+    const retest = !el.netResult.hidden;
+    const tick = () => {
+      const seconds = Math.max(0, Math.floor((Date.now() - netcheckStartedAt) / 1000));
+      el.netcheckBtn.textContent = `${retest ? '重新测试' : '测试中'} ${seconds}s`;
+    };
+    tick();
+    netcheckTimer = setInterval(tick, 1000);
+    el.netcheckBtn.setAttribute('aria-busy', 'true');
+    if (el.netResult.hidden) {
+      el.netEmpty.textContent = '正在测试，最长约 30 秒…';
+      el.netEmpty.hidden = false;
+    } else {
+      el.netNote.textContent = '正在重新测试…';
+    }
+    return;
   }
+
+  clearInterval(netcheckTimer);
+  netcheckTimer = null;
+  el.netcheckBtn.textContent = '测试';
+  el.netcheckBtn.setAttribute('aria-busy', 'false');
 }
 
 async function runNetcheck() {
   if (ui.busy || !bridge || !ui.payload || !ui.payload.running) return;
   setBusy('正在测试网络', '测试 DERP 延迟，最长约 30 秒');
   setNetcheckPending(true);
+  await waitForPaint();
+  if (!ui.busy || !bridge || !ui.payload || !ui.payload.running) {
+    setNetcheckPending(false);
+    clearBusy();
+    return;
+  }
   try {
     const result = await callWebui('netcheck', TIMEOUTS.netcheck);
     renderNetcheck(result);
@@ -1066,6 +1316,14 @@ function bindEvents() {
   el.repairBtn.addEventListener('click', () => runAction('repair', '修复路由'));
   el.updateBtn.addEventListener('click', runUpdate);
   el.netcheckBtn.addEventListener('click', runNetcheck);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      stopPing(false);
+    } else if (!ui.ping && el.peerList.querySelector('.ping-panel')) {
+      renderPeers();
+    }
+  });
+  window.addEventListener('pagehide', () => stopPing(false));
 }
 
 async function boot() {

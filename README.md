@@ -1,4 +1,4 @@
-# Tailscale Box 1.1.2 (ARM64)
+# Tailscale Box 1.1.4 (ARM64)
 
 Android Root 模块，使用原生 tailscale0 TUN：应用 → 系统路由 → tailscaled → 对端。
 使用 tailscaled 用户态 WireGuard，不使用 Android VPNService。仅支持 ARM64。
@@ -26,9 +26,9 @@ GitHub Release 提供以下两种 ZIP，均可由模块管理器直接安装：
 
 页面支持查看当前版本、服务/登录状态、Tailnet IP、设备与 Peer 在线状态、直连/中继信息，以及 `tailscale netcheck` 的 UDP、NAT 和 DERP 区域延迟。延迟是设备到中继区域的测量，并非每台 Peer 的端到端延迟；没有活动连接的 Peer 可能没有直连信息。
 
-版本旁的「检查更新」只查询官方 stable ARM64 版本，不下载或替换二进制，支持已有的本地 control-proxy 配置。设备行的 Ping 按钮持续发起单次 Tailscale Ping，显示响应延迟、平均值和丢失统计；中继响应也计为成功。停止按钮或离开页面后不再发起下一次请求。
+版本旁的「检查更新」只查询官方 stable ARM64 版本，不下载或替换二进制，支持已有的本地 control-proxy 配置。设备行的 Ping 按钮立即显示探测状态，再以约一秒的开始间隔顺序采样；慢响应会延后下一次请求。设备行与曲线区显示每次响应的直连端点、DERP 区域或 Peer relay 地址，覆盖状态快照里的「空闲」。曲线保留 30 个真实样本，用不越过样本范围的平滑线绘制，超时留缺口；延迟、平均值和丢失统计仍来自原始测量，中继响应也计为成功。停止按钮或离开页面后不再发起下一次请求，迟到响应不会恢复已停止的会话。网络延迟测试按钮立即显示测试中和计时，重测期间保留旧结果。
 
-桥接新增 `webui.sh check-update`，返回 `{current, latest, available, output, exitCode}`；空安装的 current 为空，查询失败的 latest 为空。`webui.sh ping <ip>` 返回 `{output, exitCode}`，执行 `tailscale ping --c 1 --timeout=3s --until-direct=false <ip>`，外层限制 6 秒。两者均不占用全局操作锁，Ping 参数只接受 IP 字符并作为单一参数传递，实际地址有效性由 Tailscale 校验。
+桥接 `webui.sh check-update` 返回 `{current, latest, available, output, exitCode}`；空安装的 current 为空，查询失败的 latest 为空。`webui.sh ping <ip>` 返回 `{result, output, exitCode}`，通过现有 tailscaled Unix socket 调用 `/localapi/v0/ping`，最长等待 3 秒，直接提供原始 PingResult 的路径和延迟，避开 CLI 成功后固定等待 1 秒的行为。没有新增 HTTP 监听端口。两者均不占用全局操作锁，Ping 参数只接受 IP 字符，实际地址有效性由 Tailscale 校验。HTTP 调用成功后仍需检查 `result.Err`，它非空表示本次探测失败。
 
 登录流程为：启动 → 登录 → 打开页面返回的 Tailscale 授权链接 → 浏览器完成授权 → 返回刷新，必要时点击修复路由。授权链接通过 Tailscale CLI 获取，最长约 60 秒返回；登录等待超时仍可能已生成有效链接。不要分享该链接。
 
@@ -60,6 +60,8 @@ Box TPROXY：核实规则旁路 Tailnet 网段，避免二次截获。仅配置 
 
 Linux 静态二进制没有 Android resolver 接口。需要控制面代理时，可写 `/data/adb/tailscale-direct/control-proxy`，内容为 `http://127.0.0.1:7890`（换成实际 HTTP/mixed 端口），然后重启。仅支持本地无认证 HTTP 代理。该环境变量不替代 P2P UDP，不保证所有 DERP/DNS 请求经过代理。
 
+Android 路径修复：模块复用的是 Linux 静态二进制，它安装的 `fwmark 0x80000` 旁路规则会把 socket 送到 `main/default` 表；设备报告中这两张表没有出口，随后 priority 5250 直接拒绝流量，出现 UDP `sendto: network is unreachable`，使 direct 和 peer relay 都失败。`ctl.sh` 默认设置 `TS_FORCE_LINUX_BIND_TO_DEVICE=1`，改用上游提供的接口绑定路径，避免上述 SO_MARK；设置同名环境变量为 `0` 可临时对照旧行为。修改后必须重启模块服务，再用 `netcheck` 和 `tailscale ping` 验证。默认接口识别及 Wi-Fi/移动网络切换仍需实机确认；本次报告中的默认接口为 `rmnet_data2`，不是所有 Android 设备的固定接口。
+
 ## 更新与排错
 
 Action 调用 `update.sh`，从官方 stable API 获取 ARM64 归档，校验 SHA256，测试候选二进制，再备份现有文件和身份后替换。没有安装 Tailscale 时也能运行。
@@ -67,6 +69,10 @@ Action 调用 `update.sh`，从官方 stable API 获取 ARM64 归档，校验 SH
 身份保留在原路径；备份位于数据目录的 `backup-*`。安装来源写入 `installed-provenance.txt`。
 
 `ctl.sh diagnose` 提供状态、netcheck 和 daemon 日志。服务日志在 `/data/adb/tailscale-direct/daemon.log`；Action 日志为 `action.log`。不要公开 `tailscaled.state`、授权链接或身份凭证。
+
+排查「只能 DERP」时运行 `ctl.sh network-diagnose 对端TailnetIP`。它会收集 netcheck、原始连接状态、IPv4/IPv6 策略路由、UDP socket 和近期网络日志，并对指定设备做最多 25 秒的连接探测；不修改路由或重启服务。报告会遮蔽标准 Tailscale 授权链接，但包含设备名和网络地址，分享前可自行遮蔽这些内容。
+
+网页区分 `PeerRelay`、`CurAddr` 与 DERP，空闲在线设备不会被统计成正在使用 DERP。网络通道仍需以持续业务流量或实际 Ping 响应确认。模块运行 Linux 静态 tailscaled，与 Android App 的 protect/bind socket 集成不同。1.1.3 默认改用接口绑定来处理报告已证实的标记路由失败；用户已实机确认恢复直连，peer relay 与网络切换仍需继续验证。
 
 ## 构建与发布
 

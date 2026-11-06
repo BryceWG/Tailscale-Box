@@ -64,10 +64,17 @@ case "$1" in
   if ! $installed; then
    printf '{"output":"Tailscale is not installed","exitCode":1}\n'; exit 0
   fi
-  # until-direct=false counts a successful DERP pong as success as well.
-  timeout 6 "$M/ctl.sh" ts ping --c 1 --timeout=3s --until-direct=false "$ip" > "$T/output" 2>&1
+  # The CLI sleeps one second after each pong, even with --c 1. Use its
+  # underlying Unix-socket API to return the measured path immediately.
+  curl -fsS --noproxy '*' --connect-timeout 1 --max-time 3 \
+   --unix-socket "$D/tailscaled.sock" \
+   --data-urlencode "ip=$ip" --data 'type=disco' \
+   http://local-tailscaled.sock/localapi/v0/ping > "$T/result" 2> "$T/output"
   rc=$?
-  printf '{"exitCode":%s,"output":' "$rc"; json_file "$T/output"; printf '}\n';;
+  printf '{"exitCode":%s,"output":' "$rc"; json_file "$T/output"
+  printf ',"result":'
+  if [ "$rc" -eq 0 ]; then cat "$T/result"; else printf null; fi
+  printf '}\n';;
  status)
   printf '{"installed":%s,"running":%s,"version":' "$installed" "$running"
   if $installed; then "$M/bin/tailscale" version 2>/dev/null | head -n 1 > "$T/version"; else : > "$T/version"; fi

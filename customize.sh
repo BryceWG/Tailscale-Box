@@ -10,7 +10,7 @@ if [ ! -f "$MODPATH/bin/tailscale" ] && [ -x "$OLD/bin/tailscale" ] && [ -x "$OL
  mkdir -p "$MODPATH/bin"
  cp -p "$OLD/bin/tailscale" "$OLD/bin/tailscaled" "$MODPATH/bin/" || abort "Cannot preserve installed Tailscale"
 fi
-for SCRIPT in ctl.sh update.sh action.sh webui.sh service.sh uninstall.sh; do
+for SCRIPT in ctl.sh update.sh action.sh webui.sh network-diagnose.sh service.sh uninstall.sh; do
  set_perm "$MODPATH/$SCRIPT" 0 0 0755
 done
 if [ -f "$MODPATH/bin/tailscale" ] && [ -f "$MODPATH/bin/tailscaled" ]; then

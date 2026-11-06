@@ -8,3 +8,4 @@ dist/
 *.log
 *.state
 .env
+tailscale-network*.txt
